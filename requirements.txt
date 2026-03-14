@@ -1,0 +1,7 @@
+pystray
+keyboard
+pyperclip
+requests
+pygame-ce
+Pillow
+imageio-ffmpeg
