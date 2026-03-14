@@ -52,7 +52,7 @@ VOICES = [
 # TEMA VISUAL
 # ──────────────────────────────────────────────────────────────
 
-COLORS = {
+DARK_COLORS = {
     "bg":        "#1a1b2e",   # Fondo principal — navy oscuro
     "surface":   "#252640",   # Superficie elevada
     "surface2":  "#2e2f52",   # Inputs / tarjetas
@@ -63,17 +63,32 @@ COLORS = {
     "border":    "#3a3c62",   # Bordes sutiles
 }
 
+LIGHT_COLORS = {
+    "bg":        "#f5f6fa",   # Fondo blanco azulado
+    "surface":   "#ffffff",   # Superficie blanca
+    "surface2":  "#eaecf4",   # Inputs / tarjetas
+    "accent":    "#4285f4",   # Google Blue
+    "accent_dk": "#2a66d1",   # Google Blue oscuro (hover/pressed)
+    "text":      "#1f2033",   # Texto oscuro
+    "text_dim":  "#6b6d8a",   # Texto secundario
+    "border":    "#c8cae0",   # Bordes sutiles
+}
 
-def _set_dark_titlebar(window):
-    """Activa la barra de título oscura en Windows 10/11 (si está disponible)."""
+# Se asigna en TrayApp.__init__ según la configuración guardada
+COLORS = DARK_COLORS
+
+
+def _apply_titlebar_theme(window):
+    """Aplica barra de título oscura o clara en Windows 10/11 según el tema activo."""
     try:
         import ctypes
         window.update_idletasks()
         hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        dark = 1 if COLORS is DARK_COLORS else 0
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
             hwnd, 20,
-            ctypes.byref(ctypes.c_int(1)),
-            ctypes.sizeof(ctypes.c_int(1)),
+            ctypes.byref(ctypes.c_int(dark)),
+            ctypes.sizeof(ctypes.c_int(dark)),
         )
     except Exception:
         pass
@@ -169,6 +184,7 @@ DEFAULT_CONFIG = {
     "voice_name": "es-US-Neural2-A",
     "speaking_rate": 1.0,
     "pitch": 0.0,
+    "theme": "dark",
 }
 
 
@@ -227,7 +243,7 @@ def _show_api_not_enabled(parent, enable_url: str):
     dlg.configure(bg=COLORS["bg"])
     dlg.grab_set()
     dlg.focus_force()
-    _set_dark_titlebar(dlg)
+    _apply_titlebar_theme(dlg)
 
     f = ttk.Frame(dlg, padding=20)
     f.pack(fill="both", expand=True)
@@ -464,7 +480,7 @@ class FloatingPlayer:
         self.window.attributes("-topmost", True)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Escape>", lambda e: self.close())
-        _set_dark_titlebar(self.window)
+        _apply_titlebar_theme(self.window)
 
         self._build()
         self._position()
@@ -623,6 +639,9 @@ class TrayApp:
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title("TTS Reader")
+        # Aplicar tema según configuración guardada
+        global COLORS
+        COLORS = DARK_COLORS if (self.config.theme or "dark") == "dark" else LIGHT_COLORS
         setup_theme(self.root)
 
         self.icon = pystray.Icon(
@@ -841,7 +860,7 @@ class TutorialWindow:
         self.window.configure(bg=COLORS["bg"])
         self.window.grab_set()
         self.window.focus_force()
-        _set_dark_titlebar(self.window)
+        _apply_titlebar_theme(self.window)
         self._build()
         self._center()
 
@@ -893,7 +912,7 @@ class TutorialWindow:
             ttk.Label(
                 inner,
                 text=desc,
-                foreground="#333",
+                foreground=COLORS["text_dim"],
                 font=("Segoe UI", 8),
                 justify="left",
             ).pack(anchor="w", padx=(0, 0), pady=(4, 0))
@@ -941,7 +960,7 @@ class SettingsWindow:
         self.window.configure(bg=COLORS["bg"])
         self.window.grab_set()
         self.window.focus_force()
-        _set_dark_titlebar(self.window)
+        _apply_titlebar_theme(self.window)
 
         self._build()
         self._center()
@@ -1076,6 +1095,20 @@ class SettingsWindow:
         ttk.Separator(f).grid(row=row, column=0, columnspan=3, sticky="ew", pady=6)
         row += 1
 
+        # ── Tema ─────────────────────────────────────────────
+        ttk.Label(f, text="Tema:", font=("Segoe UI", 9, "bold")).grid(
+            row=row, column=0, sticky="w"
+        )
+        self._theme_var = tk.StringVar(value=self.config.theme or "dark")
+        tf = ttk.Frame(f)
+        tf.grid(row=row, column=1, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Radiobutton(tf, text="Oscuro", variable=self._theme_var, value="dark").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(tf, text="Claro",  variable=self._theme_var, value="light").pack(side="left")
+        row += 1
+
+        ttk.Separator(f).grid(row=row, column=0, columnspan=3, sticky="ew", pady=6)
+        row += 1
+
         # ── Botones ──────────────────────────────────────────
         bf = ttk.Frame(f)
         bf.grid(row=row, column=0, columnspan=3, sticky="ew")
@@ -1162,6 +1195,7 @@ class SettingsWindow:
         threading.Thread(target=_run, daemon=True).start()
 
     def _save(self):
+        global COLORS
         idx = self._voice_labels.index(self._voice_var.get())
         self.config.api_key      = self._key_var.get().strip()
         self.config.voice_name   = self._voice_names[idx]
@@ -1170,6 +1204,9 @@ class SettingsWindow:
         hk = self._hk_var.get().strip()
         if hk:
             self.config.hotkey = hk
+        self.config.theme = self._theme_var.get()
+        COLORS = DARK_COLORS if self.config.theme == "dark" else LIGHT_COLORS
+        setup_theme(self.window.master)
         self.config.save()
         messagebox.showinfo("Guardado", "Configuración guardada correctamente.", parent=self.window)
         self.window.destroy()
