@@ -49,6 +49,109 @@ VOICES = [
 ]
 
 # ──────────────────────────────────────────────────────────────
+# TEMA VISUAL
+# ──────────────────────────────────────────────────────────────
+
+COLORS = {
+    "bg":        "#1a1b2e",   # Fondo principal — navy oscuro
+    "surface":   "#252640",   # Superficie elevada
+    "surface2":  "#2e2f52",   # Inputs / tarjetas
+    "accent":    "#4285f4",   # Google Blue
+    "accent_dk": "#2a66d1",   # Google Blue oscuro (hover/pressed)
+    "text":      "#e8eaf6",   # Texto principal
+    "text_dim":  "#8b8db8",   # Texto secundario
+    "border":    "#3a3c62",   # Bordes sutiles
+}
+
+
+def _set_dark_titlebar(window):
+    """Activa la barra de título oscura en Windows 10/11 (si está disponible)."""
+    try:
+        import ctypes
+        window.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 20,
+            ctypes.byref(ctypes.c_int(1)),
+            ctypes.sizeof(ctypes.c_int(1)),
+        )
+    except Exception:
+        pass
+
+
+def setup_theme(root):
+    """Aplica el tema oscuro a todos los widgets ttk."""
+    bg       = COLORS["bg"]
+    surface  = COLORS["surface"]
+    surface2 = COLORS["surface2"]
+    accent   = COLORS["accent"]
+    accent_dk = COLORS["accent_dk"]
+    text     = COLORS["text"]
+    text_dim = COLORS["text_dim"]
+    border   = COLORS["border"]
+
+    style = ttk.Style(root)
+    style.theme_use("clam")
+
+    style.configure(".",
+        background=bg, foreground=text,
+        fieldbackground=surface2,
+        selectbackground=accent, selectforeground=text,
+        troughcolor=surface2,
+        bordercolor=border, darkcolor=border, lightcolor=border,
+        font=("Segoe UI", 9),
+        relief="flat",
+    )
+    style.configure("TFrame", background=bg)
+    style.configure("TLabel", background=bg, foreground=text)
+    style.configure("TEntry",
+        fieldbackground=surface2, foreground=text,
+        insertcolor=text, relief="flat", borderwidth=1,
+    )
+    style.map("TEntry",
+        bordercolor=[("focus", accent), ("!focus", border)],
+    )
+    style.configure("TButton",
+        background=surface2, foreground=text,
+        borderwidth=0, relief="flat", padding=(10, 5),
+        focuscolor=accent,
+    )
+    style.map("TButton",
+        background=[("active", surface), ("pressed", border)],
+        foreground=[("active", text)],
+    )
+    style.configure("Accent.TButton",
+        background=accent, foreground="white",
+        borderwidth=0, relief="flat", padding=(10, 5),
+    )
+    style.map("Accent.TButton",
+        background=[("active", accent_dk), ("pressed", accent_dk)],
+        foreground=[("active", "white"), ("pressed", "white")],
+    )
+    style.configure("TCombobox",
+        fieldbackground=surface2, background=surface,
+        foreground=text, arrowcolor=text_dim,
+        selectbackground=accent, borderwidth=1,
+    )
+    style.map("TCombobox",
+        fieldbackground=[("readonly", surface2)],
+        foreground=[("readonly", text)],
+        selectbackground=[("readonly", accent)],
+    )
+    style.configure("TSeparator", background=border)
+    style.configure("TCheckbutton", background=bg, foreground=text, focuscolor=bg)
+    style.map("TCheckbutton",
+        background=[("active", bg)],
+        foreground=[("active", text)],
+        indicatorcolor=[("selected", accent), ("!selected", surface2)],
+    )
+    style.configure("Horizontal.TScale",
+        background=bg, troughcolor=surface2, borderwidth=0,
+    )
+    root.configure(bg=bg)
+
+
+# ──────────────────────────────────────────────────────────────
 # CONFIGURACIÓN
 # ──────────────────────────────────────────────────────────────
 
@@ -121,8 +224,10 @@ def _show_api_not_enabled(parent, enable_url: str):
     dlg = tk.Toplevel(parent)
     dlg.title("API no habilitada")
     dlg.resizable(False, False)
+    dlg.configure(bg=COLORS["bg"])
     dlg.grab_set()
     dlg.focus_force()
+    _set_dark_titlebar(dlg)
 
     f = ttk.Frame(dlg, padding=20)
     f.pack(fill="both", expand=True)
@@ -144,7 +249,8 @@ def _show_api_not_enabled(parent, enable_url: str):
     lnk = tk.Label(
         f,
         text="→ Habilitar la API de Text-to-Speech (clic aquí)",
-        foreground="#1a73e8",
+        foreground="#4285f4",
+        background=COLORS["bg"],
         font=("Segoe UI", 9, "underline"),
         cursor="hand2",
     )
@@ -354,9 +460,11 @@ class FloatingPlayer:
         self.window = tk.Toplevel(parent)
         self.window.title("TTS Reader")
         self.window.resizable(False, False)
+        self.window.configure(bg=COLORS["bg"])
         self.window.attributes("-topmost", True)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Escape>", lambda e: self.close())
+        _set_dark_titlebar(self.window)
 
         self._build()
         self._position()
@@ -372,37 +480,50 @@ class FloatingPlayer:
         self.window.after(600, self._poll)
 
     def _build(self):
-        f = ttk.Frame(self.window, padding=(20, 14))
-        f.pack()
+        # Línea de acento en la parte superior (Google Blue)
+        tk.Frame(self.window, bg=COLORS["accent"], height=3).pack(fill="x", side="top")
 
-        self._status_lbl = ttk.Label(
-            f, text="▶  Leyendo...", font=("Segoe UI", 10, "bold")
-        )
-        self._status_lbl.pack(pady=(0, 10))
+        f = tk.Frame(self.window, bg=COLORS["bg"])
+        f.pack(fill="both", expand=True, padx=22, pady=16)
 
-        self._btn = ttk.Button(
-            f, text="⏸  Pausar", command=self._toggle, width=16
-        )
-        self._btn.pack()
-
-        ttk.Label(
+        self._status_lbl = tk.Label(
             f,
-            text="Espacio: pausar/continuar  ·  Esc: cerrar",
-            foreground="#888",
+            text="▶  Leyendo...",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLORS["bg"], fg=COLORS["text"],
+        )
+        self._status_lbl.pack(pady=(0, 12))
+
+        self._btn = tk.Button(
+            f,
+            text="⏸  Pausar",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLORS["accent"], fg="white",
+            activebackground=COLORS["accent_dk"], activeforeground="white",
+            relief="flat", bd=0, padx=18, pady=7,
+            cursor="hand2",
+            command=self._toggle,
+        )
+        self._btn.pack(fill="x")
+
+        tk.Label(
+            f,
+            text="Espacio: pausar / continuar   ·   Esc: cerrar",
             font=("Segoe UI", 7),
-        ).pack(pady=(8, 0))
+            bg=COLORS["bg"], fg=COLORS["text_dim"],
+        ).pack(pady=(10, 0))
 
     def _toggle(self):
         if self._closed:
             return
         if self.player.is_paused():
             self.player.resume()
-            self._status_lbl.config(text="▶  Leyendo...")
-            self._btn.config(text="⏸  Pausar")
+            self._status_lbl.config(text="▶  Leyendo...", fg=COLORS["text"])
+            self._btn.config(text="⏸  Pausar", bg=COLORS["accent"])
         elif self.player.is_playing():
             self.player.pause()
-            self._status_lbl.config(text="⏸  Pausado")
-            self._btn.config(text="▶  Continuar")
+            self._status_lbl.config(text="⏸  Pausado", fg=COLORS["text_dim"])
+            self._btn.config(text="▶  Continuar", bg=COLORS["surface2"])
 
     def _poll(self):
         if self._closed:
@@ -502,6 +623,7 @@ class TrayApp:
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title("TTS Reader")
+        setup_theme(self.root)
 
         self.icon = pystray.Icon(
             "tts_tray",
@@ -716,8 +838,10 @@ class TutorialWindow:
         self.window = tk.Toplevel(parent)
         self.window.title("Cómo obtener la API Key de Google Cloud TTS")
         self.window.resizable(False, False)
+        self.window.configure(bg=COLORS["bg"])
         self.window.grab_set()
         self.window.focus_force()
+        _set_dark_titlebar(self.window)
         self._build()
         self._center()
 
@@ -780,7 +904,8 @@ class TutorialWindow:
                 lnk = tk.Label(
                     inner,
                     text=btn_text,
-                    foreground="#1a73e8",
+                    foreground="#4285f4",
+                    background=COLORS["bg"],
                     font=("Segoe UI", 8, "underline"),
                     cursor="hand2",
                 )
@@ -813,8 +938,10 @@ class SettingsWindow:
         self.window = tk.Toplevel(parent)
         self.window.title("TTS Reader — Configuración")
         self.window.resizable(False, False)
+        self.window.configure(bg=COLORS["bg"])
         self.window.grab_set()
         self.window.focus_force()
+        _set_dark_titlebar(self.window)
 
         self._build()
         self._center()
@@ -888,6 +1015,10 @@ class SettingsWindow:
             f, from_=0.5, to=4.0, resolution=0.1, variable=self._speed_var,
             orient="horizontal", length=310, showvalue=False,
             command=lambda v: self._speed_entry_var.set(f"{float(v):.2f}"),
+            bg=COLORS["bg"], fg=COLORS["text"],
+            troughcolor=COLORS["surface2"],
+            highlightbackground=COLORS["bg"],
+            activebackground=COLORS["accent"],
         )
         speed_slider.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(2, 10))
         row += 1
@@ -950,8 +1081,9 @@ class SettingsWindow:
         bf.grid(row=row, column=0, columnspan=3, sticky="ew")
 
         ttk.Button(bf, text="Probar voz", command=self._test).pack(side="left")
-        ttk.Button(bf, text="Guardar",    command=self._save).pack(side="right", padx=(6, 0))
-        ttk.Button(bf, text="Cancelar",   command=self.window.destroy).pack(side="right")
+        ttk.Button(bf, text="Guardar", command=self._save,
+                   style="Accent.TButton").pack(side="right", padx=(6, 0))
+        ttk.Button(bf, text="Cancelar", command=self.window.destroy).pack(side="right")
 
     # ── captura de shortcut ──────────────────────────────────
 
