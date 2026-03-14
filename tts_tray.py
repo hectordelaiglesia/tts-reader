@@ -11,6 +11,7 @@ Uso:
 
 import os
 import sys
+import re
 import json
 import time
 import base64
@@ -329,6 +330,41 @@ class GoogleTTS:
 # FFMPEG / ATEMPO (time-stretching para velocidades altas)
 # ──────────────────────────────────────────────────────────────
 
+def split_into_chunks(text: str) -> list:
+    """Divide el texto en oraciones para navegación con Ctrl+←/→.
+    Separa primero por párrafos y luego por finales de oración (.!?).
+    Cada chunk respeta el límite MAX_CHARS."""
+    paragraphs = re.split(r'\n{2,}', text)
+    pat = re.compile(r'(?<![.!?])[.!?](?:\s+|$)')
+    chunks = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        last = 0
+        for m in pat.finditer(para):
+            s = para[last:m.end()].strip()
+            if s:
+                chunks.append(s)
+            last = m.end()
+        tail = para[last:].strip()
+        if tail:
+            chunks.append(tail)
+    # Dividir chunks que superen MAX_CHARS
+    result = []
+    for c in chunks:
+        if len(c) > MAX_CHARS:
+            while c:
+                cut = c[:MAX_CHARS].rfind(' ')
+                if cut < MAX_CHARS // 2:
+                    cut = MAX_CHARS
+                result.append(c[:cut].strip())
+                c = c[cut:].strip()
+        else:
+            result.append(c)
+    return result if result else [text.strip()]
+
+
 def _find_ffmpeg() -> str | None:
     """Devuelve la ruta a ffmpeg: primero el del sistema, luego imageio-ffmpeg."""
     path = shutil.which("ffmpeg")
@@ -468,10 +504,19 @@ class FloatingPlayer:
     Se abre automáticamente al iniciar la lectura.
     Escape o cerrar la ventana detiene el audio."""
 
-    def __init__(self, parent, player: AudioPlayer, on_close_cb):
+    def __init__(self, parent, player: AudioPlayer, on_close_cb,
+                 total_chunks: int = 1, on_audio_end_cb=None,
+                 nav_prev_cb=None, nav_next_cb=None):
         self.player = player
         self.on_close_cb = on_close_cb
         self._closed = False
+        self._total_chunks = total_chunks
+        self._on_audio_end_cb = on_audio_end_cb
+        self._nav_prev_cb = nav_prev_cb
+        self._nav_next_cb = nav_next_cb
+        self._waiting_for_chunk = False  # evita doble-disparo en _poll durante síntesis
+        self._prev_hotkey = None
+        self._next_hotkey = None
 
         self.window = tk.Toplevel(parent)
         self.window.title("TTS Reader")
@@ -492,6 +537,21 @@ class FloatingPlayer:
             suppress=False,
         )
 
+        # Hotkeys de navegación — solo si hay más de un chunk
+        if total_chunks > 1:
+            if nav_prev_cb:
+                self._prev_hotkey = keyboard.add_hotkey(
+                    "ctrl+left",
+                    lambda: self.window.after(0, self._nav_prev_cb),
+                    suppress=False,
+                )
+            if nav_next_cb:
+                self._next_hotkey = keyboard.add_hotkey(
+                    "ctrl+right",
+                    lambda: self.window.after(0, self._nav_next_cb),
+                    suppress=False,
+                )
+
         # Empezar a verificar si el audio terminó naturalmente
         self.window.after(600, self._poll)
 
@@ -508,7 +568,20 @@ class FloatingPlayer:
             font=("Segoe UI", 11, "bold"),
             bg=COLORS["bg"], fg=COLORS["text"],
         )
-        self._status_lbl.pack(pady=(0, 12))
+        self._status_lbl.pack(pady=(0, 4))
+
+        # Label de progreso — solo visible con múltiples chunks
+        if self._total_chunks > 1:
+            self._progress_lbl = tk.Label(
+                f,
+                text=f"1 / {self._total_chunks}",
+                font=("Segoe UI", 8),
+                bg=COLORS["bg"], fg=COLORS["text_dim"],
+            )
+            self._progress_lbl.pack(pady=(0, 10))
+        else:
+            self._progress_lbl = None
+            tk.Frame(f, height=8, bg=COLORS["bg"]).pack()  # spacer
 
         self._btn = tk.Button(
             f,
@@ -522,9 +595,13 @@ class FloatingPlayer:
         )
         self._btn.pack(fill="x")
 
+        if self._total_chunks > 1:
+            hint = "Espacio: pausar   ·   Ctrl+←/→: navegar   ·   Esc: cerrar"
+        else:
+            hint = "Espacio: pausar / continuar   ·   Esc: cerrar"
         tk.Label(
             f,
-            text="Espacio: pausar / continuar   ·   Esc: cerrar",
+            text=hint,
             font=("Segoe UI", 7),
             bg=COLORS["bg"], fg=COLORS["text_dim"],
         ).pack(pady=(10, 0))
@@ -544,11 +621,18 @@ class FloatingPlayer:
     def _poll(self):
         if self._closed:
             return
-        # Si el audio terminó naturalmente (ni playing ni paused), cerrar la ventana
+        # Si el audio terminó naturalmente (ni playing ni paused)
         if not self.player.is_playing() and not self.player.is_paused():
-            self.close(stop_audio=False)
-            return
-        self.window.after(300, self._poll)
+            if self._on_audio_end_cb and not self._waiting_for_chunk:
+                # Delegar al TrayApp para que decida si avanzar o cerrar.
+                # _waiting_for_chunk evita doble-disparo mientras se sintetiza el siguiente.
+                self._waiting_for_chunk = True
+                self._on_audio_end_cb()
+            elif not self._on_audio_end_cb:
+                self.close(stop_audio=False)
+                return
+        if not self._closed:
+            self.window.after(300, self._poll)
 
     def close(self, stop_audio=True):
         if self._closed:
@@ -558,6 +642,12 @@ class FloatingPlayer:
             keyboard.remove_hotkey(self._space_hotkey)
         except Exception:
             pass
+        for hk in (self._prev_hotkey, self._next_hotkey):
+            if hk is not None:
+                try:
+                    keyboard.remove_hotkey(hk)
+                except Exception:
+                    pass
         if stop_audio:
             self.player.stop()
         try:
@@ -566,6 +656,21 @@ class FloatingPlayer:
             pass
         if self.on_close_cb:
             self.on_close_cb()
+
+    def set_progress(self, current: int, total: int):
+        """Actualiza el label de progreso (current es 1-indexed)."""
+        if self._closed:
+            return
+        if self._progress_lbl:
+            self._progress_lbl.config(text=f"{current} / {total}")
+
+    def set_playing_state(self):
+        """Restablece la UI al estado 'leyendo' y resetea el flag de espera."""
+        if self._closed:
+            return
+        self._waiting_for_chunk = False
+        self._status_lbl.config(text="▶  Leyendo...", fg=COLORS["text"])
+        self._btn.config(text="⏸  Pausar", bg=COLORS["accent"])
 
     def _position(self):
         self.window.update_idletasks()
@@ -634,6 +739,11 @@ class TrayApp:
         self._reading = False
         self._settings_open = False
         self._floating_player = None
+        # Navegación por chunks (oraciones/párrafos)
+        self._chunks = []
+        self._chunk_idx = 0
+        self._chunk_cache = {}   # idx -> mp3 bytes
+        self._nav_gen = 0        # generación para cancelar síntesis en vuelo
 
         # Root tkinter oculto (para manejar ventanas de diálogo en el hilo principal)
         self.root = tk.Tk()
@@ -718,9 +828,20 @@ class TrayApp:
             if text == marker or not text.strip():
                 return  # Nada seleccionado
 
-            mp3 = self.tts.synthesize(text.strip())
+            # Dividir en oraciones para navegación
+            self._chunks = split_into_chunks(text.strip())
+            self._chunk_idx = 0
+            self._chunk_cache = {}
+            self._nav_gen += 1
+            gen = self._nav_gen
+
+            mp3 = self.tts.synthesize(self._chunks[0])
+            if self._nav_gen != gen:
+                return  # Navegación canceló esta lectura antes de que terminara
+            self._chunk_cache[0] = mp3
             self.player.play(mp3, speed=self.config.speaking_rate)
-            self.root.after(0, self._open_floating_player)
+            total = len(self._chunks)
+            self.root.after(0, lambda: self._open_floating_player(total))
 
         except ValueError as e:
             # API key no configurada
@@ -770,18 +891,70 @@ class TrayApp:
 
     # ── floating player ─────────────────────────────────────
 
-    def _open_floating_player(self):
+    def _open_floating_player(self, total_chunks: int = 1):
         if self._floating_player is not None:
             try:
                 self._floating_player.close(stop_audio=False)
             except Exception:
                 pass
         self._floating_player = FloatingPlayer(
-            self.root, self.player, self._on_floating_closed
+            self.root, self.player,
+            on_close_cb=self._on_floating_closed,
+            total_chunks=total_chunks,
+            on_audio_end_cb=self._on_chunk_end,
+            nav_prev_cb=self._nav_prev,
+            nav_next_cb=self._nav_next,
         )
 
     def _on_floating_closed(self):
         self._floating_player = None
+
+    # ── navegación por chunks ────────────────────────────────
+
+    def _play_chunk(self, idx: int):
+        """Reproduce el chunk[idx]. Siempre llamado desde el hilo principal."""
+        if idx < 0 or idx >= len(self._chunks):
+            if self._floating_player:
+                self._floating_player.close(stop_audio=True)
+            return
+        self._chunk_idx = idx
+        self._nav_gen += 1
+        gen = self._nav_gen
+        if self._floating_player:
+            self._floating_player.set_progress(idx + 1, len(self._chunks))
+            self._floating_player.set_playing_state()
+        if idx in self._chunk_cache:
+            self.player.play(self._chunk_cache[idx], speed=self.config.speaking_rate)
+        else:
+            def _synth():
+                try:
+                    mp3 = self.tts.synthesize(self._chunks[idx])
+                    if self._nav_gen != gen:
+                        return
+                    self._chunk_cache[idx] = mp3
+                    self.player.play(mp3, speed=self.config.speaking_rate)
+                except Exception as e:
+                    self._notify("TTS Reader — Error", str(e)[:120])
+                    self.root.after(0, lambda: self._floating_player and
+                                    self._floating_player.close())
+            threading.Thread(target=_synth, daemon=True).start()
+
+    def _on_chunk_end(self):
+        """Callback cuando el audio termina naturalmente. Avanza al siguiente chunk."""
+        next_idx = self._chunk_idx + 1
+        if next_idx >= len(self._chunks):
+            if self._floating_player:
+                self._floating_player.close(stop_audio=False)
+        else:
+            self._play_chunk(next_idx)
+
+    def _nav_prev(self):
+        """Ir al chunk anterior (o reiniciar el actual si es el primero)."""
+        self._play_chunk(max(0, self._chunk_idx - 1))
+
+    def _nav_next(self):
+        """Ir al siguiente chunk (o cerrar si es el último)."""
+        self._play_chunk(self._chunk_idx + 1)
 
     # ── settings ────────────────────────────────────────────
 
