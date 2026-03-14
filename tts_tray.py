@@ -248,6 +248,7 @@ class AudioPlayer:
         self._tmp_in  = None
         self._tmp_out = None
         self._lock = threading.Lock()
+        self._paused = False
 
     def play(self, mp3: bytes, speed: float = 1.0):
         with self._lock:
@@ -297,8 +298,25 @@ class AudioPlayer:
                     try: os.unlink(old)
                     except Exception: pass
 
+    def pause(self):
+        if pygame.mixer.music.get_busy():
+            pygame.mixer.music.pause()
+            self._paused = True
+
+    def resume(self):
+        if self._paused:
+            pygame.mixer.music.unpause()
+            self._paused = False
+
+    def is_playing(self) -> bool:
+        return pygame.mixer.music.get_busy() and not self._paused
+
+    def is_paused(self) -> bool:
+        return self._paused
+
     def stop(self):
         pygame.mixer.music.stop()
+        self._paused = False
 
 
 # ──────────────────────────────────────────────────────────────
@@ -317,6 +335,109 @@ def _make_icon() -> Image.Image:
     d.arc([40, 20, 58, 44], -70, 70, fill="white", width=3)
     d.arc([44, 25, 58, 39], -70, 70, fill="white", width=3)
     return img
+
+
+# ──────────────────────────────────────────────────────────────
+# VENTANA FLOTANTE DE REPRODUCCIÓN
+# ──────────────────────────────────────────────────────────────
+
+class FloatingPlayer:
+    """Ventanita flotante (siempre encima) con botón play/pausa.
+    Se abre automáticamente al iniciar la lectura.
+    Escape o cerrar la ventana detiene el audio."""
+
+    def __init__(self, parent, player: AudioPlayer, on_close_cb):
+        self.player = player
+        self.on_close_cb = on_close_cb
+        self._closed = False
+
+        self.window = tk.Toplevel(parent)
+        self.window.title("TTS Reader")
+        self.window.resizable(False, False)
+        self.window.attributes("-topmost", True)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.window.bind("<Escape>", lambda e: self.close())
+
+        self._build()
+        self._position()
+
+        # Barra espaciadora para play/pause (global, solo mientras esta ventana existe)
+        self._space_hotkey = keyboard.add_hotkey(
+            "space",
+            lambda: self.window.after(0, self._toggle),
+            suppress=False,
+        )
+
+        # Empezar a verificar si el audio terminó naturalmente
+        self.window.after(600, self._poll)
+
+    def _build(self):
+        f = ttk.Frame(self.window, padding=(20, 14))
+        f.pack()
+
+        self._status_lbl = ttk.Label(
+            f, text="▶  Leyendo...", font=("Segoe UI", 10, "bold")
+        )
+        self._status_lbl.pack(pady=(0, 10))
+
+        self._btn = ttk.Button(
+            f, text="⏸  Pausar", command=self._toggle, width=16
+        )
+        self._btn.pack()
+
+        ttk.Label(
+            f,
+            text="Espacio: pausar/continuar  ·  Esc: cerrar",
+            foreground="#888",
+            font=("Segoe UI", 7),
+        ).pack(pady=(8, 0))
+
+    def _toggle(self):
+        if self._closed:
+            return
+        if self.player.is_paused():
+            self.player.resume()
+            self._status_lbl.config(text="▶  Leyendo...")
+            self._btn.config(text="⏸  Pausar")
+        elif self.player.is_playing():
+            self.player.pause()
+            self._status_lbl.config(text="⏸  Pausado")
+            self._btn.config(text="▶  Continuar")
+
+    def _poll(self):
+        if self._closed:
+            return
+        # Si el audio terminó naturalmente (ni playing ni paused), cerrar la ventana
+        if not self.player.is_playing() and not self.player.is_paused():
+            self.close(stop_audio=False)
+            return
+        self.window.after(300, self._poll)
+
+    def close(self, stop_audio=True):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            keyboard.remove_hotkey(self._space_hotkey)
+        except Exception:
+            pass
+        if stop_audio:
+            self.player.stop()
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
+        if self.on_close_cb:
+            self.on_close_cb()
+
+    def _position(self):
+        self.window.update_idletasks()
+        w  = self.window.winfo_width()
+        h  = self.window.winfo_height()
+        sw = self.window.winfo_screenwidth()
+        sh = self.window.winfo_screenheight()
+        # Esquina inferior derecha (cerca del tray)
+        self.window.geometry(f"+{sw - w - 24}+{sh - h - 60}")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -375,6 +496,7 @@ class TrayApp:
         self.player = AudioPlayer()
         self._reading = False
         self._settings_open = False
+        self._floating_player = None
 
         # Root tkinter oculto (para manejar ventanas de diálogo en el hilo principal)
         self.root = tk.Tk()
@@ -457,6 +579,7 @@ class TrayApp:
 
             mp3 = self.tts.synthesize(text.strip())
             self.player.play(mp3, speed=self.config.speaking_rate)
+            self.root.after(0, self._open_floating_player)
 
         except ValueError as e:
             # API key no configurada
@@ -479,9 +602,17 @@ class TrayApp:
         _set_startup(not _is_startup_enabled())
 
     def _menu_stop(self, *_):
-        self.player.stop()
+        if self._floating_player:
+            self._floating_player.close()
+        else:
+            self.player.stop()
 
     def _menu_exit(self, *_):
+        if self._floating_player:
+            try:
+                self._floating_player.close()
+            except Exception:
+                pass
         self.player.stop()
         try:
             keyboard.unhook_all_hotkeys()
@@ -495,6 +626,21 @@ class TrayApp:
             self.icon.notify(msg, title)
         except Exception:
             pass
+
+    # ── floating player ─────────────────────────────────────
+
+    def _open_floating_player(self):
+        if self._floating_player is not None:
+            try:
+                self._floating_player.close(stop_audio=False)
+            except Exception:
+                pass
+        self._floating_player = FloatingPlayer(
+            self.root, self.player, self._on_floating_closed
+        )
+
+    def _on_floating_closed(self):
+        self._floating_player = None
 
     # ── settings ────────────────────────────────────────────
 
